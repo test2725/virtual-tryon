@@ -1,19 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const COMFYUI_URL = process.env.COMFYUI_URL || 'http://localhost:8188';
-
-export async function POST(req: NextRequest) {
+export async function POST(request: NextRequest) {
   try {
-    const formData = await req.formData();
+    const formData = await request.formData();
     const personFile = formData.get('person') as File;
     const garmentFile = formData.get('garment') as File;
-    const garmentType = formData.get('garment_type') as string || 'shirt';
+    const garmentType = formData.get('garmentType') as string || 'upper_body';
 
     if (!personFile || !garmentFile) {
-      return NextResponse.json({ error: '画像が必要です' }, { status: 400 });
+      return NextResponse.json({ error: 'Missing files' }, { status: 400 });
     }
 
-    // 人物画像をComfyUIにアップロード
+    const COMFYUI_URL = process.env.COMFYUI_URL || 'http://localhost:8188';
+
+    // Upload person image
     const personForm = new FormData();
     personForm.append('image', personFile);
     const personUpload = await fetch(`${COMFYUI_URL}/upload/image`, {
@@ -23,7 +23,7 @@ export async function POST(req: NextRequest) {
     const personData = await personUpload.json();
     const personName = personData.name;
 
-    // 服画像をComfyUIにアップロード
+    // Upload garment image
     const garmentForm = new FormData();
     garmentForm.append('image', garmentFile);
     const garmentUpload = await fetch(`${COMFYUI_URL}/upload/image`, {
@@ -33,7 +33,7 @@ export async function POST(req: NextRequest) {
     const garmentData = await garmentUpload.json();
     const garmentName = garmentData.name;
 
-    // ワークフローを実行
+    // Run workflow
     const workflow = buildWorkflow(personName, garmentName, garmentType);
     const promptRes = await fetch(`${COMFYUI_URL}/prompt`, {
       method: 'POST',
@@ -43,7 +43,7 @@ export async function POST(req: NextRequest) {
     const promptData = await promptRes.json();
     const promptId = promptData.prompt_id;
 
-    // 結果を待つ
+    // Wait for result
     let resultImage = null;
     for (let i = 0; i < 60; i++) {
       await new Promise(r => setTimeout(r, 3000));
@@ -52,20 +52,20 @@ export async function POST(req: NextRequest) {
       if (history[promptId]?.outputs) {
         const outputs = history[promptId].outputs;
         for (const nodeId in outputs) {
-          if (outputs[nodeId].images) {
+          if (outputs[nodeId].images?.[0]) {
             resultImage = outputs[nodeId].images[0];
             break;
           }
         }
-        if (resultImage) break;
       }
+      if (resultImage) break;
     }
 
     if (!resultImage) {
-      return NextResponse.json({ error 'タイムアウトしました' }, { status: 500 });
+      return NextResponse.json({ error: 'Timeout' }, { status: 500 });
     }
 
-    // 画像を取得してBase64で返す
+    // Fetch image as base64
     const imageRes = await fetch(
       `${COMFYUI_URL}/view?filename=${resultImage.filename}&subfolder=${resultImage.subfolder}&type=${resultImage.type}`
     );
@@ -74,7 +74,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ image: `data:image/png;base64,${base64}` });
   } catch (error) {
-    return NextResponse.json({ error: 'エラーが発生しました' }, { status: 500 });
+    return NextResponse.json({ error: 'Server error' }, { status: 500 });
   }
 }
 
