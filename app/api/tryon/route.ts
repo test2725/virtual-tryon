@@ -1,4 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
 
 export async function POST(request: NextRequest) {
   try {
@@ -11,30 +17,52 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Missing files' }, { status: 400 });
     }
 
+    // Insert job into Supabase
+    const { data: job, error } = await supabase
+      .from('tryon_jobs')
+      .insert({ status: 'pending' })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // Start async processing (fire and forget)
+    processJob(job.id, personFile, garmentFile, garmentType);
+
+    return NextResponse.json({ jobId: job.id });
+  } catch (error) {
+    return NextResponse.json({ error: 'Server error' }, { status: 500 });
+  }
+}
+
+export async function GET(request: NextRequest) {
+  const jobId = request.nextUrl.searchParams.get('jobId');
+  if (!jobId) return NextResponse.json({ error: 'No jobId' }, { status: 400 });
+
+  const { data: job } = await supabase
+    .from('tryon_jobs')
+    .select('*')
+    .eq('id', jobId)
+    .single();
+
+  return NextResponse.json(job);
+}
+
+async function processJob(jobId: string, personFile: File, garmentFile: File, garmentType: string) {
+  try {
     const COMFYUI_URL = process.env.COMFYUI_URL || 'http://localhost:8188';
 
-    // Upload person image
     const personForm = new FormData();
     personForm.append('image', personFile);
-    const personUpload = await fetch(`${COMFYUI_URL}/upload/image`, {
-      method: 'POST',
-      body: personForm,
-    });
+    const personUpload = await fetch(`${COMFYUI_URL}/upload/image`, { method: 'POST', body: personForm });
     const personData = await personUpload.json();
-    const personName = personData.name;
 
-    // Upload garment image
     const garmentForm = new FormData();
     garmentForm.append('image', garmentFile);
-    const garmentUpload = await fetch(`${COMFYUI_URL}/upload/image`, {
-      method: 'POST',
-      body: garmentForm,
-    });
+    const garmentUpload = await fetch(`${COMFYUI_URL}/upload/image`, { method: 'POST', body: garmentForm });
     const garmentData = await garmentUpload.json();
-    const garmentName = garmentData.name;
 
-    // Run workflow
-    const workflow = buildWorkflow(personName, garmentName, garmentType);
+    const workflow = buildWorkflow(personData.name, garmentData.name, garmentType);
     const promptRes = await fetch(`${COMFYUI_URL}/prompt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -43,17 +71,15 @@ export async function POST(request: NextRequest) {
     const promptData = await promptRes.json();
     const promptId = promptData.prompt_id;
 
-    // Wait for result
     let resultImage = null;
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 120; i++) {
       await new Promise(r => setTimeout(r, 3000));
       const historyRes = await fetch(`${COMFYUI_URL}/history/${promptId}`);
       const history = await historyRes.json();
       if (history[promptId]?.outputs) {
-        const outputs = history[promptId].outputs;
-        for (const nodeId in outputs) {
-          if (outputs[nodeId].images?.[0]) {
-            resultImage = outputs[nodeId].images[0];
+        for (const nodeId in history[promptId].outputs) {
+          if (history[promptId].outputs[nodeId].images?.[0]) {
+            resultImage = history[promptId].outputs[nodeId].images[0];
             break;
           }
         }
@@ -61,20 +87,24 @@ export async function POST(request: NextRequest) {
       if (resultImage) break;
     }
 
-    if (!resultImage) {
-      return NextResponse.json({ error: 'Timeout' }, { status: 500 });
-    }
+    if (!resultImage) throw new Error('Timeout');
 
-    // Fetch image as base64
     const imageRes = await fetch(
       `${COMFYUI_URL}/view?filename=${resultImage.filename}&subfolder=${resultImage.subfolder}&type=${resultImage.type}`
     );
     const imageBuffer = await imageRes.arrayBuffer();
     const base64 = Buffer.from(imageBuffer).toString('base64');
 
-    return NextResponse.json({ image: `data:image/png;base64,${base64}` });
-  } catch (error) {
-    return NextResponse.json({ error: 'Server error' }, { status: 500 });
+    await supabase.from('tryon_jobs').update({
+      status: 'done',
+      result_image: `data:image/png;base64,${base64}`
+    }).eq('id', jobId);
+
+  } catch (err: any) {
+    await supabase.from('tryon_jobs').update({
+      status: 'error',
+      error: err.message
+    }).eq('id', jobId);
   }
 }
 

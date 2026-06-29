@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
 const GARMENT_TYPES = [
   { value: 'upper_body', label: 'Top' },
@@ -15,7 +15,9 @@ export default function Home() {
   const [garmentType, setGarmentType] = useState('upper_body');
   const [result, setResult] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const pollRef = useRef<NodeJS.Timeout | null>(null);
 
   const handlePerson = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
@@ -27,11 +29,32 @@ export default function Home() {
     if (f) { setGarmentFile(f); setGarmentImg(URL.createObjectURL(f)); }
   };
 
+  const pollJob = (jobId: string) => {
+    pollRef.current = setInterval(async () => {
+      const res = await fetch(`/api/tryon?jobId=${jobId}`);
+      const job = await res.json();
+      if (job.status === 'done') {
+        clearInterval(pollRef.current!);
+        setResult(job.result_image);
+        setLoading(false);
+        setStatus('');
+      } else if (job.status === 'error') {
+        clearInterval(pollRef.current!);
+        setError(job.error || 'Error');
+        setLoading(false);
+        setStatus('');
+      } else {
+        setStatus('Processing...');
+      }
+    }, 5000);
+  };
+
   const handleTryOn = async () => {
     if (!personFile || !garmentFile) return;
     setLoading(true);
     setError(null);
     setResult(null);
+    setStatus('Uploading...');
     try {
       const fd = new FormData();
       fd.append('person', personFile);
@@ -40,19 +63,22 @@ export default function Home() {
       const res = await fetch('/api/tryon', { method: 'POST', body: fd });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      setResult(data.image);
+      setStatus('Processing... (takes a few minutes)');
+      pollJob(data.jobId);
     } catch (e: any) {
       setError(e.message);
-    } finally {
       setLoading(false);
+      setStatus('');
     }
   };
 
+  useEffect(() => {
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, []);
+
   return (
     <div style={{ minHeight: '100vh', background: '#0f0f14', color: '#f0eef8', fontFamily: 'sans-serif', padding: '20px', maxWidth: '500px', margin: '0 auto' }}>
-      <h1 style={{ textAlign: 'center', fontSize: '24px', fontWeight: 'bold', marginBottom: '24px' }}>
-        Try On AI
-      </h1>
+      <h1 style={{ textAlign: 'center', fontSize: '24px', fontWeight: 'bold', marginBottom: '24px' }}>Try On AI</h1>
 
       <div style={{ marginBottom: '16px' }}>
         <p style={{ fontSize: '12px', color: '#888', marginBottom: '8px' }}>Person photo</p>
@@ -64,7 +90,7 @@ export default function Home() {
 
       <div style={{ marginBottom: '16px' }}>
         <p style={{ fontSize: '12px', color: '#888', marginBottom: '8px' }}>Garment type</p>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+        <div style={{ display: 'flex', gap: '8px' }}>
           {GARMENT_TYPES.map(t => (
             <button key={t.value} onClick={() => setGarmentType(t.value)}
               style={{ padding: '8px 12px', borderRadius: '20px', border: '1px solid', borderColor: garmentType === t.value ? '#e8427a' : '#333', background: garmentType === t.value ? 'rgba(232,66,122,0.1)' : '#1a1a24', color: garmentType === t.value ? '#e8427a' : '#888', fontSize: '13px', cursor: 'pointer' }}>
@@ -84,7 +110,7 @@ export default function Home() {
 
       <button onClick={handleTryOn} disabled={!personFile || !garmentFile || loading}
         style={{ width: '100%', padding: '16px', background: 'linear-gradient(135deg, #e8427a, #7c3aed)', border: 'none', borderRadius: '12px', color: 'white', fontSize: '16px', fontWeight: 'bold', cursor: 'pointer', opacity: (!personFile || !garmentFile || loading) ? 0.5 : 1 }}>
-        {loading ? 'Processing...' : 'Try On'}
+        {loading ? status : 'Try On'}
       </button>
 
       {error && <div style={{ marginTop: '16px', padding: '12px', background: 'rgba(255,80,80,0.1)', border: '1px solid rgba(255,80,80,0.3)', borderRadius: '8px', color: '#ff8888' }}>{error}</div>}
